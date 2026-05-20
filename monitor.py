@@ -49,6 +49,9 @@ EMBED_COLOR = 0xFF9900
 
 PRODUCT_INFO_URL = "promotion/psp/productInfoList"
 
+# Merchant IDs correspondant a Amazon directement (pas vendeurs tiers)
+AMAZON_MERCHANT_IDS = {"A1X6FK5RDHNB96"}
+
 NORMAL_AVAILABILITY = {
     "Habituellement expédié sous 1 à 2 mois",
     "Habituellement expédié sous 3 à 7 mois",
@@ -159,6 +162,7 @@ def _parse_api_batches(batches: list[dict]) -> Dict[str, Dict[str, Any]]:
                 "position": position,
                 "disponibilite": item.get("availabilityMessage") or None,
                 "prix": prix,
+                "merchantId": item.get("merchantId") or None,
                 "commandable": commandable,
                 "dateLivraison": date,
                 "messageLivraison": msg,
@@ -236,7 +240,12 @@ def notify_discord(
     msg_livraison = product.get("messageLivraison")
     availability = product.get("disponibilite") or "Non renseignee"
 
-    cart_link = f"[🛒 Ajouter 2 ex. au panier (ATC)]({_cart_url(asin)})"
+    sold_by_amazon = product.get("merchantId") in AMAZON_MERCHANT_IDS
+    cart_link = (
+        f"[🛒 Ajouter 2 ex. au panier (ATC)]({_cart_url(asin)})"
+        if sold_by_amazon
+        else "⚠️ Vendu par un tiers — achat sur la page produit"
+    )
 
     event_titles = {
         "nouveau":       "🆕 Nouveau produit détecté !",
