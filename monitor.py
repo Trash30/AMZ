@@ -163,6 +163,9 @@ def _parse_api_batches(batches: list[dict]) -> Dict[str, Dict[str, Any]]:
                 "disponibilite": item.get("availabilityMessage") or None,
                 "prix": prix,
                 "merchantId": item.get("merchantId") or None,
+                "canAddToCart": item.get("canAddToCart"),
+                "blockATCAsin": item.get("blockATCAsin"),
+                "prime": item.get("prime"),
                 "commandable": commandable,
                 "dateLivraison": date,
                 "messageLivraison": msg,
@@ -341,10 +344,17 @@ async def run_cycle(
         return state
 
     for asin in [a for a in products if a not in state]:
-        title = products[asin].get("titre") or asin
-        log(f"🆕 Nouveau : {title} ({asin})")
+        p = products[asin]
+        title = p.get("titre") or asin
+        log(
+            f"🆕 Nouveau : {title} ({asin}) | "
+            f"canAddToCart={p.get('canAddToCart')} "
+            f"blockATCAsin={p.get('blockATCAsin')} "
+            f"prime={p.get('prime')} "
+            f"merchantId={p.get('merchantId')}"
+        )
         try:
-            notify_discord(asin, products[asin], reason="nouveau")
+            notify_discord(asin, p, reason="nouveau")
         except Exception as exc:
             log(f"⚠️ Erreur notification : {exc}")
 
