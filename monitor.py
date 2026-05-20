@@ -430,7 +430,15 @@ async def main() -> None:
             if initial_run:
                 try:
                     products = await scrape_products(page)
-                    log(f"Premier run — {len(products)} produits")
+                    log(f"Premier run — {len(products)} produits :")
+                    for asin, p in products.items():
+                        log(
+                            f"  {p.get('titre') or asin} ({asin}) | "
+                            f"canAddToCart={p.get('canAddToCart')} "
+                            f"blockATCAsin={p.get('blockATCAsin')} "
+                            f"prime={p.get('prime')} "
+                            f"merchantId={p.get('merchantId')}"
+                        )
                     if products:
                         state = products
                         save_state(state)
