@@ -51,6 +51,10 @@ PRODUCT_SELECTOR = "li.productGrid[data-asin]"
 DELIVERY_SELECTOR = ".udm-primary-delivery-message"
 SEE_MORE_SELECTOR = "a[href*='ref=_see_more']"
 
+# Passer a True pour loguer toutes les requetes XHR/fetch du premier cycle
+# et identifier les endpoints Amazon a intercepter
+DEBUG_NETWORK = True
+
 NORMAL_AVAILABILITY = {
     "Habituellement expédié sous 1 à 2 mois",
     "Habituellement expédié sous 3 à 7 mois",
@@ -208,7 +212,37 @@ _EXTRACT_JS = """
 """
 
 
-async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
+async def scrape_products(
+    page: Page,
+    debug_network: bool = False,
+) -> Dict[str, Dict[str, Any]]:
+
+    captured: list[dict] = []
+
+    if debug_network:
+        async def _on_response(response) -> None:
+            url = response.url
+            # On ignore les assets statiques
+            if any(ext in url for ext in (".png", ".jpg", ".gif", ".css", ".woff", ".ico")):
+                return
+            ct = (response.headers.get("content-type") or "").lower()
+            if "json" in ct or "javascript" in ct or "html" in ct:
+                try:
+                    body = await response.body()
+                    size = len(body)
+                    preview = body[:120].decode("utf-8", errors="replace").replace("\n", " ")
+                    captured.append({
+                        "status": response.status,
+                        "url": url,
+                        "ct": ct.split(";")[0],
+                        "size": size,
+                        "preview": preview,
+                    })
+                except Exception:
+                    pass
+
+        page.on("response", _on_response)
+
     await page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
 
     try:
@@ -241,6 +275,18 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
 
     with_date = sum(1 for p in result.values() if p.get("commandable"))
     log(f"  → {len(result)} produits extraits — {with_date} commandables")
+
+    if debug_network and captured:
+        log("=" * 60)
+        log(f"DEBUG RESEAU — {len(captured)} requetes capturees :")
+        for i, r in enumerate(captured, 1):
+            log(f"  [{i:02d}] {r['status']} {r['ct']} {r['size']}o")
+            log(f"        URL     : {r['url']}")
+            log(f"        Preview : {r['preview']}")
+        log("=" * 60)
+        if page.listeners("response"):
+            page.remove_listener("response", page.listeners("response")[0])
+
     return result
 
 
@@ -442,7 +488,7 @@ async def main() -> None:
         try:
             if initial_run:
                 try:
-                    products = await scrape_products(page)
+                    products = await scrape_products(page, debug_network=DEBUG_NETWORK)
                     log(f"Premier run — {len(products)} produits")
                     if products:
                         state = products
@@ -451,6 +497,14 @@ async def main() -> None:
                         log("⚠️ Aucun produit au premier run (probable anti-bot)")
                 except Exception as exc:
                     log(f"⚠️ Erreur : {exc}")
+            else:
+                # Pas de initial_run mais debug demande : on scrape une fois pour capturer
+                if DEBUG_NETWORK:
+                    try:
+                        log("Mode debug reseau actif — capture du premier cycle...")
+                        await scrape_products(page, debug_network=True)
+                    except Exception as exc:
+                        log(f"⚠️ Erreur debug : {exc}")
 
             while True:
                 await asyncio.sleep(INTERVAL_SECONDS)
