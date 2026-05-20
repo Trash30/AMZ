@@ -307,22 +307,11 @@ def notify_discord(
         embed["image"] = {"url": image}
 
     cart_url = f"{AMAZON_BASE}/gp/aws/cart/add.html?ASIN.1={asin}&Quantity.1=2"
-    payload = {
-        "embeds": [embed],
-        "components": [
-            {
-                "type": 1,
-                "components": [
-                    {
-                        "type": 2,
-                        "style": 5,
-                        "label": "🛒 Ajouter au panier (x2)",
-                        "url": cart_url,
-                    }
-                ],
-            }
-        ],
-    }
+    embed["fields"] = [
+        {"name": "Panier", "value": f"[🛒 Ajouter au panier (x2)]({cart_url})", "inline": True}
+    ]
+
+    payload = {"embeds": [embed]}
 
     try:
         response = requests.post(
