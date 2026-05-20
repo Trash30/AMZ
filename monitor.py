@@ -243,9 +243,19 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Optional[str]]]:
     """Scrape la page cible et retourne les produits indexes par ASIN."""
     await page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
 
+    # Les blocs de livraison sont charges en asynchrone apres networkidle
+    try:
+        await page.wait_for_selector(".udm-primary-delivery-message", timeout=10000)
+    except Exception:
+        pass  # Certains produits n'ont pas de bloc livraison
+
     clicks = await _click_see_more(page)
     if clicks:
         log(f"  → {clicks} clic(s) 'Afficher plus'")
+        try:
+            await page.wait_for_selector(".udm-primary-delivery-message", timeout=5000)
+        except Exception:
+            pass
 
     for selector in PRODUCT_SELECTORS:
         products = await _extract_with_selector(page, selector)
@@ -306,7 +316,7 @@ def notify_discord(
     if image:
         embed["image"] = {"url": image}
 
-    cart_url = f"{AMAZON_BASE}/gp/aws/cart/add.html?ASIN.1={asin}&Quantity.1=2"
+    cart_url = f"{AMAZON_BASE}/gp/aws/cart/add.html?ASIN.1={asin}&Quantity.1=2&AssociateTag=botbluray-21"
     embed["fields"] = [
         {"name": "Panier", "value": f"[🛒 Ajouter au panier (x2)]({cart_url})", "inline": True}
     ]
