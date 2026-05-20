@@ -46,12 +46,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 STATE_FILE = SCRIPT_DIR / "state.json"
 
 PRODUCT_SELECTORS = [
-    "div[data-asin]",
-    "div.s-result-item[data-asin]",
+    "li.productGrid[data-asin]",  # structure reelle de la page promo Amazon
     "li[data-asin]",
+    "div.s-result-item[data-asin]",
+    "div[data-asin]",
 ]
 
 TITLE_SELECTORS = [
+    "a[data-name='productTitle']",  # lien titre direct sur la page promo
     "h2 a span", "h2 span",
     ".a-size-medium", ".a-size-base-plus",
     "[data-cy='title-recipe'] span", ".a-text-normal",
