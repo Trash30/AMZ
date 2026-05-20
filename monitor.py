@@ -50,10 +50,10 @@ EMBED_COLOR = 0xFF9900
 PRODUCT_SELECTOR = "li.productGrid[data-asin]"
 DELIVERY_SELECTOR = ".udm-primary-delivery-message"
 SEE_MORE_SELECTOR = "a[href*='ref=_see_more']"
+PRODUCT_INFO_URL = "promotion/psp/productInfoList"
 
-# Passer a True pour loguer toutes les requetes XHR/fetch du premier cycle
-# et identifier les endpoints Amazon a intercepter
-DEBUG_NETWORK = True
+# Passer a True pour logger la structure JSON complete de productInfoList
+DEBUG_API = True
 
 NORMAL_AVAILABILITY = {
     "Habituellement expédié sous 1 à 2 mois",
@@ -212,81 +212,57 @@ _EXTRACT_JS = """
 """
 
 
-async def scrape_products(
-    page: Page,
-    debug_network: bool = False,
-) -> Dict[str, Dict[str, Any]]:
+async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
+    api_batches: list[dict] = []
 
-    captured: list[dict] = []
+    async def _on_product_info(response) -> None:
+        if PRODUCT_INFO_URL not in response.url:
+            return
+        try:
+            data = await response.json()
+            api_batches.append(data)
+        except Exception as exc:
+            log(f"  ⚠️ Erreur parsing productInfoList : {exc}")
 
-    if debug_network:
-        async def _on_response(response) -> None:
-            url = response.url
-            # On ignore les assets statiques
-            if any(ext in url for ext in (".png", ".jpg", ".gif", ".css", ".woff", ".ico")):
-                return
-            ct = (response.headers.get("content-type") or "").lower()
-            if "json" in ct or "javascript" in ct or "html" in ct:
-                try:
-                    body = await response.body()
-                    size = len(body)
-                    preview = body[:120].decode("utf-8", errors="replace").replace("\n", " ")
-                    captured.append({
-                        "status": response.status,
-                        "url": url,
-                        "ct": ct.split(";")[0],
-                        "size": size,
-                        "preview": preview,
-                    })
-                except Exception:
-                    pass
-
-        page.on("response", _on_response)
-
-    await page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
-
+    page.on("response", _on_product_info)
     try:
-        await page.wait_for_selector(PRODUCT_SELECTOR, timeout=30000)
-    except Exception:
-        log("⚠️ Aucun produit detecte dans le DOM (probable anti-bot)")
-        return {}
+        await page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
 
+        try:
+            await page.wait_for_selector(PRODUCT_SELECTOR, timeout=30000)
+        except Exception:
+            log("⚠️ Aucun produit detecte dans le DOM (probable anti-bot)")
+            return {}
+
+        await _scroll_to_bottom(page)
+        await _expand_all(page)
+        await asyncio.sleep(1)  # laisser les derniers appels API arriver
+    finally:
+        page.remove_listener("response", _on_product_info)
+
+    if DEBUG_API and api_batches:
+        log("=" * 60)
+        log(f"DEBUG productInfoList — {len(api_batches)} batch(es) recus")
+        first_item = (
+            api_batches[0]
+            .get("viewModels", {})
+            .get("PRODUCT_INFO_LIST", [{}])[0]
+        )
+        log("Cles du premier produit :")
+        for k, v in first_item.items():
+            preview = str(v)[:120].replace("\n", " ")
+            log(f"  {k}: {preview}")
+        log("=" * 60)
+
+    # Fallback DOM tant qu'on n'a pas valide la structure API
     nb = await page.locator(PRODUCT_SELECTOR).count()
-    log(f"  → {nb} produit(s) au chargement initial")
-
-    # Scroll pour declencher le lazy-loading avant d'expand
-    await _scroll_to_bottom(page)
-
-    nb_after_scroll = await page.locator(PRODUCT_SELECTOR).count()
-    if nb_after_scroll != nb:
-        log(f"  → {nb_after_scroll} produit(s) apres scroll ({nb_after_scroll - nb:+d})")
-
-    await _expand_all(page)
-
-    nb_final = await page.locator(PRODUCT_SELECTOR).count()
-    if nb_final != nb_after_scroll:
-        log(f"  → {nb_final} produit(s) apres expand ({nb_final - nb_after_scroll:+d})")
-
     await _wait_for_delivery_blocks(page)
-
     result = await page.evaluate(_EXTRACT_JS)
     if not isinstance(result, dict):
         return {}
 
     with_date = sum(1 for p in result.values() if p.get("commandable"))
-    log(f"  → {len(result)} produits extraits — {with_date} commandables")
-
-    if debug_network and captured:
-        log("=" * 60)
-        log(f"DEBUG RESEAU — {len(captured)} requetes capturees :")
-        for i, r in enumerate(captured, 1):
-            log(f"  [{i:02d}] {r['status']} {r['ct']} {r['size']}o")
-            log(f"        URL     : {r['url']}")
-            log(f"        Preview : {r['preview']}")
-        log("=" * 60)
-        if page.listeners("response"):
-            page.remove_listener("response", page.listeners("response")[0])
-
+    log(f"  → {len(result)}/{nb} produits extraits — {with_date} commandables")
     return result
 
 
@@ -488,7 +464,7 @@ async def main() -> None:
         try:
             if initial_run:
                 try:
-                    products = await scrape_products(page, debug_network=DEBUG_NETWORK)
+                    products = await scrape_products(page)
                     log(f"Premier run — {len(products)} produits")
                     if products:
                         state = products
@@ -497,14 +473,6 @@ async def main() -> None:
                         log("⚠️ Aucun produit au premier run (probable anti-bot)")
                 except Exception as exc:
                     log(f"⚠️ Erreur : {exc}")
-            else:
-                # Pas de initial_run mais debug demande : on scrape une fois pour capturer
-                if DEBUG_NETWORK:
-                    try:
-                        log("Mode debug reseau actif — capture du premier cycle...")
-                        await scrape_products(page, debug_network=True)
-                    except Exception as exc:
-                        log(f"⚠️ Erreur debug : {exc}")
 
             while True:
                 await asyncio.sleep(INTERVAL_SECONDS)
