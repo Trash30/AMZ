@@ -1,16 +1,16 @@
 """
-Amazon Promotion Page Monitor v2.1
+Amazon Promotion Page Monitor v3.0
 
-Surveille https://www.amazon.fr/promotion/psp/A26013IELTKPDW toutes les
-INTERVAL_SECONDS secondes et notifie via webhook Discord lorsqu'un nouveau
-produit apparait, passe en tete de liste, change de disponibilite ou devient
-commandable.
+Surveille https://www.amazon.fr/promotion/psp/A26013IELTKPDW en interceptant
+l'API interne productInfoList — pas de scraping DOM, pas d'attente de
+stabilisation, cycle en 3-5 secondes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -47,13 +47,7 @@ STATE_FILE = SCRIPT_DIR / "state.json"
 AMAZON_BASE = "https://www.amazon.fr"
 EMBED_COLOR = 0xFF9900
 
-PRODUCT_SELECTOR = "li.productGrid[data-asin]"
-DELIVERY_SELECTOR = ".udm-primary-delivery-message"
-SEE_MORE_SELECTOR = "a[href*='ref=_see_more']"
 PRODUCT_INFO_URL = "promotion/psp/productInfoList"
-
-# Passer a True pour logger la structure JSON complete de productInfoList
-DEBUG_API = True
 
 NORMAL_AVAILABILITY = {
     "Habituellement expédié sous 1 à 2 mois",
@@ -61,6 +55,15 @@ NORMAL_AVAILABILITY = {
     "Habituellement expédié sous 6 à 7 mois",
     "Habituellement expédié sous 1 à 3 mois",
 }
+
+# Regex pour extraire la date de livraison du HTML deliveryBlock
+_RE_DELIVERY_DATE = re.compile(
+    r'class="[^"]*a-text-bold[^"]*"[^>]*>(.*?)</span>', re.DOTALL
+)
+_RE_DELIVERY_MSG = re.compile(
+    r'udm-primary-delivery-message[^>]*>.*?<div[^>]*>(.*?)</div>', re.DOTALL
+)
+_RE_STRIP_TAGS = re.compile(r'<[^>]+>')
 
 
 # ---------------------------------------------------------------------------
@@ -103,167 +106,107 @@ def save_state(state: Dict[str, Dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scraping
+# Parsing API
 # ---------------------------------------------------------------------------
 
 
-async def _scroll_to_bottom(page: Page) -> None:
-    """Scroll progressif pour declencher le lazy-loading Amazon."""
-    prev_height = -1
-    while True:
-        height = await page.evaluate("document.body.scrollHeight")
-        if height == prev_height:
-            break
-        prev_height = height
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(0.8)
-    # Remonte en haut pour que les boutons soient visibles
-    await page.evaluate("window.scrollTo(0, 0)")
-
-
-async def _expand_all(page: Page) -> None:
-    """Clique tous les boutons 'Afficher plus' en scrollant au besoin."""
-    clicks = 0
-    while True:
-        try:
-            btn = page.locator(SEE_MORE_SELECTOR).first
-            await btn.wait_for(state="visible", timeout=2000)
-            await btn.scroll_into_view_if_needed()
-            await btn.click()
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            clicks += 1
-        except Exception:
-            break
-    if clicks:
-        log(f"  → {clicks} clic(s) 'Afficher plus'")
-
-
-async def _wait_for_delivery_blocks(page: Page) -> None:
+def _parse_delivery_block(html: str) -> tuple[bool, Optional[str], Optional[str]]:
     """
-    Poll le count de blocs livraison jusqu'a stabilisation (2 s sans variation).
-    Amazon les injecte en asynchrone apres le rendu initial.
+    Extrait (commandable, dateLivraison, messageLivraison) depuis le HTML
+    du champ deliveryBlock retourne par l'API productInfoList.
     """
-    prev_count = -1
-    stable_ticks = 0
-    for _ in range(60):  # timeout 30 s
-        count = await page.locator(DELIVERY_SELECTOR).count()
-        if count == prev_count:
-            stable_ticks += 1
-            if stable_ticks >= 4:
-                log(f"  → {count} bloc(s) livraison stables")
-                return
-        else:
-            stable_ticks = 0
-            prev_count = count
-        await asyncio.sleep(0.5)
-    log("  ⚠️ Timeout attente blocs livraison — extraction quand meme")
+    if not html:
+        return False, None, None
+
+    date_match = _RE_DELIVERY_DATE.search(html)
+    date = date_match.group(1).strip() if date_match else None
+
+    msg_match = _RE_DELIVERY_MSG.search(html)
+    if msg_match:
+        raw = _RE_STRIP_TAGS.sub("", msg_match.group(1))
+        msg = " ".join(raw.split())
+    else:
+        msg = None
+
+    return bool(date), date, msg
 
 
-_EXTRACT_JS = """
-() => {
-    const BASE = "https://www.amazon.fr";
-    const products = {};
+def _parse_api_batches(batches: list[dict]) -> Dict[str, Dict[str, Any]]:
+    """Construit le dict produits depuis les batches productInfoList."""
+    products: Dict[str, Dict[str, Any]] = {}
+    position = 0
 
-    document.querySelectorAll("li.productGrid[data-asin]").forEach((el, i) => {
-        const asin = (el.getAttribute("data-asin") || "").trim();
-        if (!asin) return;
+    for batch in batches:
+        items = batch.get("viewModels", {}).get("PRODUCT_INFO_LIST", [])
+        for item in items:
+            asin = (item.get("asin") or "").strip()
+            if not asin:
+                continue
 
-        const titleAnchor = el.querySelector("a[data-name='productTitle']");
-        const title = titleAnchor?.textContent?.trim() || null;
-        const rawHref = titleAnchor?.getAttribute("href") || null;
-        const link = rawHref
-            ? (rawHref.startsWith("http") ? rawHref : BASE + rawHref)
-            : null;
+            href = item.get("detailPageLink") or ""
+            link = (AMAZON_BASE + href) if href else f"{AMAZON_BASE}/dp/{asin}"
 
-        const image =
-            el.querySelector("img[name='productImage']")?.getAttribute("src") ||
-            null;
+            price_info = item.get("priceInfo") or {}
+            price_to_pay = price_info.get("priceToPay") or {}
+            prix = (price_to_pay.get("displayString") or "").replace("\xa0", " ").strip() or None
 
-        const availability =
-            el.querySelector("[data-name='availabilityMessage']")
-              ?.textContent?.trim() || null;
+            commandable, date, msg = _parse_delivery_block(item.get("deliveryBlock") or "")
 
-        // Prix via aria-label (ex: "12,21 €")
-        const priceEl = el.querySelector("[name='productPriceToPay']");
-        const prix = priceEl?.getAttribute("aria-label")?.trim() || null;
+            products[asin] = {
+                "titre": item.get("title") or None,
+                "lien": link,
+                "image": item.get("imgURL") or None,
+                "position": position,
+                "disponibilite": item.get("availabilityMessage") or None,
+                "prix": prix,
+                "commandable": commandable,
+                "dateLivraison": date,
+                "messageLivraison": msg,
+            }
+            position += 1
 
-        // Message de livraison complet + date seule
-        const deliveryBlock = el.querySelector(".udm-primary-delivery-message");
-        const deliveryBold = deliveryBlock?.querySelector(".a-text-bold");
-        const deliveryDate = deliveryBold?.textContent?.trim() || null;
-        const messageLivraison = deliveryBlock?.textContent
-            ?.replace(/\\s+/g, " ").trim() || null;
+    return products
 
-        products[asin] = {
-            titre: title,
-            lien: link,
-            image,
-            position: i,
-            disponibilite: availability,
-            prix,
-            commandable: !!deliveryDate,
-            dateLivraison: deliveryDate,
-            messageLivraison,
-        };
-    });
 
-    return products;
-}
-"""
+# ---------------------------------------------------------------------------
+# Scraping via interception API
+# ---------------------------------------------------------------------------
 
 
 async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
+    """
+    Charge la page et intercepte les reponses productInfoList.
+    Pas de scraping DOM — l'API livre tous les produits en 2 batches.
+    """
     api_batches: list[dict] = []
 
-    async def _on_product_info(response) -> None:
+    async def _on_response(response) -> None:
         if PRODUCT_INFO_URL not in response.url:
             return
         try:
             data = await response.json()
+            nb = len(data.get("viewModels", {}).get("PRODUCT_INFO_LIST", []))
+            log(f"  → batch API recu : {nb} produit(s)")
             api_batches.append(data)
         except Exception as exc:
             log(f"  ⚠️ Erreur parsing productInfoList : {exc}")
 
-    page.on("response", _on_product_info)
+    page.on("response", _on_response)
     try:
         await page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
-
-        try:
-            await page.wait_for_selector(PRODUCT_SELECTOR, timeout=30000)
-        except Exception:
-            log("⚠️ Aucun produit detecte dans le DOM (probable anti-bot)")
-            return {}
-
-        await _scroll_to_bottom(page)
-        await _expand_all(page)
-        await asyncio.sleep(1)  # laisser les derniers appels API arriver
+        # Petit delai pour les batches tardifs
+        await asyncio.sleep(1)
     finally:
-        page.remove_listener("response", _on_product_info)
+        page.remove_listener("response", _on_response)
 
-    if DEBUG_API and api_batches:
-        log("=" * 60)
-        log(f"DEBUG productInfoList — {len(api_batches)} batch(es) recus")
-        first_item = (
-            api_batches[0]
-            .get("viewModels", {})
-            .get("PRODUCT_INFO_LIST", [{}])[0]
-        )
-        log("Cles du premier produit :")
-        for k, v in first_item.items():
-            preview = str(v)[:120].replace("\n", " ")
-            log(f"  {k}: {preview}")
-        log("=" * 60)
-
-    # Fallback DOM tant qu'on n'a pas valide la structure API
-    nb = await page.locator(PRODUCT_SELECTOR).count()
-    await _wait_for_delivery_blocks(page)
-    result = await page.evaluate(_EXTRACT_JS)
-    if not isinstance(result, dict):
+    if not api_batches:
+        log("⚠️ Aucun batch productInfoList recu (probable anti-bot)")
         return {}
 
-    with_date = sum(1 for p in result.values() if p.get("commandable"))
-    log(f"  → {len(result)}/{nb} produits extraits — {with_date} commandables")
-    return result
+    products = _parse_api_batches(api_batches)
+    with_date = sum(1 for p in products.values() if p.get("commandable"))
+    log(f"  → {len(products)} produits — {with_date} commandables")
+    return products
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +238,6 @@ def notify_discord(
 
     cart_link = f"[🛒 Ajouter 2 ex. au panier (ATC)]({_cart_url(asin)})"
 
-    # Titre de la notification selon l'evenement
     event_titles = {
         "nouveau":       "🆕 Nouveau produit détecté !",
         "commandable":   "🟢 Produit de retour en stock !",
@@ -306,7 +248,6 @@ def notify_discord(
 
     lines = [f"**{event_title}**", "", cart_link, ""]
 
-    # Avant / Maintenant pour disponibilite
     if reason == "disponibilite" and prev:
         prev_avail = prev.get("disponibilite") or "—"
         lines += [
@@ -315,10 +256,7 @@ def notify_discord(
             f"🟢 Maintenant : **{availability}**",
             "",
         ]
-    elif reason not in ("commandable", "nouveau", "tete_de_liste"):
-        lines += [f"Disponibilite : {availability}", ""]
 
-    # Avant / Maintenant pour livraison
     if reason == "commandable" and prev:
         prev_msg = prev.get("messageLivraison") or "Livraison non disponible"
         curr_msg = msg_livraison or (
@@ -338,7 +276,6 @@ def notify_discord(
 
     description = "\n".join(lines).strip()
 
-    # Champs inline : Prix + ASIN
     fields = []
     if prix:
         fields.append({"name": "💰 Prix", "value": prix, "inline": True})
@@ -391,7 +328,7 @@ async def run_cycle(
     log(f"Cycle #{cycle_index} — {len(products)} produits")
 
     if not products:
-        log("⚠️ Aucun produit (probable anti-bot) — etat conserve")
+        log("⚠️ Aucun produit — etat conserve")
         return state
 
     for asin in [a for a in products if a not in state]:
@@ -407,7 +344,6 @@ async def run_cycle(
             continue
         prev = state[asin]
 
-        # Tete de liste
         if product.get("position") == 0 and prev.get("position") not in (None, 0):
             title = product.get("titre") or asin
             log(f"⬆️ Tete de liste : {title} ({asin})")
@@ -416,7 +352,6 @@ async def run_cycle(
             except Exception as exc:
                 log(f"⚠️ Erreur notification : {exc}")
 
-        # Changement de disponibilite
         prev_avail = prev.get("disponibilite")
         curr_avail = product.get("disponibilite")
         if (
@@ -431,7 +366,6 @@ async def run_cycle(
             except Exception as exc:
                 log(f"⚠️ Erreur notification : {exc}")
 
-        # Devient commandable
         if product.get("commandable") and not prev.get("commandable"):
             title = product.get("titre") or asin
             log(f"🛒 Commandable : {title} ({asin}) — {product.get('dateLivraison', '')}")
@@ -445,7 +379,7 @@ async def run_cycle(
 
 
 async def main() -> None:
-    log("Demarrage du monitoring...")
+    log("Demarrage du monitoring v3.0 (mode API)...")
     state = load_state()
     initial_run = len(state) == 0 and not STATE_FILE.exists()
 
