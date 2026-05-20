@@ -51,7 +51,12 @@ PRODUCT_SELECTORS = [
     "li[data-asin]",
 ]
 
-TITLE_SELECTORS = ["h2 a span", "h2 span", ".a-size-medium"]
+TITLE_SELECTORS = [
+    "h2 a span", "h2 span",
+    ".a-size-medium", ".a-size-base-plus",
+    "[data-cy='title-recipe'] span", ".a-text-normal",
+    "span.a-truncate-full", "span.a-truncate-cut",
+]
 LINK_SELECTORS = ["h2 a", "a.a-link-normal"]
 
 AMAZON_BASE = "https://www.amazon.fr"
@@ -164,12 +169,22 @@ async def _extract_with_selector(
 
             let commandable = false;
             let deliveryDate = null;
-            const deliveryNode = el.querySelector('.udm-primary-delivery-message');
-            if (deliveryNode) {
-                const boldSpan = deliveryNode.querySelector('.a-text-bold');
-                if (boldSpan && boldSpan.textContent.trim()) {
-                    commandable = true;
-                    deliveryDate = boldSpan.textContent.trim();
+            // Cherche d'abord dans l'element, puis dans son parent proche
+            // car udm-primary-delivery-message peut etre un sibling du div[data-asin]
+            const deliverySearchRoots = [el];
+            let parent = el.parentElement;
+            for (let d = 0; d < 3 && parent; d++, parent = parent.parentElement) {
+                deliverySearchRoots.push(parent);
+            }
+            for (const root of deliverySearchRoots) {
+                const deliveryNode = root.querySelector('.udm-primary-delivery-message');
+                if (deliveryNode) {
+                    const boldSpan = deliveryNode.querySelector('.a-text-bold');
+                    if (boldSpan && boldSpan.textContent.trim()) {
+                        commandable = true;
+                        deliveryDate = boldSpan.textContent.trim();
+                    }
+                    break;
                 }
             }
 
