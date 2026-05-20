@@ -358,13 +358,7 @@ async def run_cycle(
     for asin in [a for a in products if a not in state]:
         p = products[asin]
         title = p.get("titre") or asin
-        log(
-            f"🆕 Nouveau : {title} ({asin}) | "
-            f"canAddToCart={p.get('canAddToCart')} "
-            f"blockATCAsin={p.get('blockATCAsin')} "
-            f"prime={p.get('prime')} "
-            f"merchantId={p.get('merchantId')}"
-        )
+        log(f"🆕 Nouveau : {title} ({asin})")
         try:
             notify_discord(asin, p, reason="nouveau")
         except Exception as exc:
@@ -430,15 +424,7 @@ async def main() -> None:
             if initial_run:
                 try:
                     products = await scrape_products(page)
-                    log(f"Premier run — {len(products)} produits :")
-                    for asin, p in products.items():
-                        log(
-                            f"  {p.get('titre') or asin} ({asin}) | "
-                            f"canAddToCart={p.get('canAddToCart')} "
-                            f"blockATCAsin={p.get('blockATCAsin')} "
-                            f"prime={p.get('prime')} "
-                            f"merchantId={p.get('merchantId')}"
-                        )
+                    log(f"Premier run — {len(products)} produits")
                     if products:
                         state = products
                         save_state(state)
