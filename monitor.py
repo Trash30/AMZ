@@ -163,6 +163,7 @@ def _parse_api_batches(batches: list[dict]) -> Dict[str, Dict[str, Any]]:
                 "disponibilite": item.get("availabilityMessage") or None,
                 "prix": prix,
                 "merchantId": item.get("merchantId") or None,
+                "offerListingId": item.get("offerListingId") or None,
                 "canAddToCart": item.get("canAddToCart"),
                 "blockATCAsin": item.get("blockATCAsin"),
                 "prime": item.get("prime"),
@@ -221,10 +222,21 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _cart_url(asin: str) -> str:
+def _cart_url(product: Dict[str, Any], asin: str) -> Optional[str]:
+    """
+    Retourne l'URL d'ajout au panier avec l'offerListingId specifique
+    pour cibler l'offre Amazon exacte de la page promo.
+    Retourne None si le produit n'est pas eligible (pas vendu par Amazon).
+    """
+    offer_id = product.get("offerListingId")
+    merchant_id = product.get("merchantId")
+
+    if not offer_id or merchant_id not in AMAZON_MERCHANT_IDS:
+        return None
+
     return (
         f"{AMAZON_BASE}/gp/aws/cart/add.html"
-        f"?ASIN.1={asin}&Quantity.1=2&AssociateTag={ASSOCIATE_TAG}"
+        f"?OfferListingId.1={offer_id}&Quantity.1=2&AssociateTag={ASSOCIATE_TAG}"
     )
 
 
@@ -243,10 +255,10 @@ def notify_discord(
     msg_livraison = product.get("messageLivraison")
     availability = product.get("disponibilite") or "Non renseignee"
 
-    sold_by_amazon = product.get("merchantId") in AMAZON_MERCHANT_IDS
+    cart = _cart_url(product, asin)
     cart_link = (
-        f"[🛒 Ajouter 2 ex. au panier (ATC)]({_cart_url(asin)})"
-        if sold_by_amazon
+        f"[🛒 Ajouter 2 ex. au panier (ATC)]({cart})"
+        if cart
         else "⚠️ Vendu par un tiers — achat sur la page produit"
     )
 
