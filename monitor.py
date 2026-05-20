@@ -103,12 +103,28 @@ def save_state(state: Dict[str, Dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _scroll_to_bottom(page: Page) -> None:
+    """Scroll progressif pour declencher le lazy-loading Amazon."""
+    prev_height = -1
+    while True:
+        height = await page.evaluate("document.body.scrollHeight")
+        if height == prev_height:
+            break
+        prev_height = height
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(0.8)
+    # Remonte en haut pour que les boutons soient visibles
+    await page.evaluate("window.scrollTo(0, 0)")
+
+
 async def _expand_all(page: Page) -> None:
+    """Clique tous les boutons 'Afficher plus' en scrollant au besoin."""
     clicks = 0
     while True:
         try:
             btn = page.locator(SEE_MORE_SELECTOR).first
             await btn.wait_for(state="visible", timeout=2000)
+            await btn.scroll_into_view_if_needed()
             await btn.click()
             await page.wait_for_load_state("networkidle", timeout=15000)
             clicks += 1
@@ -202,9 +218,21 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
         return {}
 
     nb = await page.locator(PRODUCT_SELECTOR).count()
-    log(f"  → {nb} produit(s) charge(s)")
+    log(f"  → {nb} produit(s) au chargement initial")
+
+    # Scroll pour declencher le lazy-loading avant d'expand
+    await _scroll_to_bottom(page)
+
+    nb_after_scroll = await page.locator(PRODUCT_SELECTOR).count()
+    if nb_after_scroll != nb:
+        log(f"  → {nb_after_scroll} produit(s) apres scroll ({nb_after_scroll - nb:+d})")
 
     await _expand_all(page)
+
+    nb_final = await page.locator(PRODUCT_SELECTOR).count()
+    if nb_final != nb_after_scroll:
+        log(f"  → {nb_final} produit(s) apres expand ({nb_final - nb_after_scroll:+d})")
+
     await _wait_for_delivery_blocks(page)
 
     result = await page.evaluate(_EXTRACT_JS)
