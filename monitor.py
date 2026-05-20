@@ -1,5 +1,5 @@
 """
-Amazon Promotion Page Monitor v2.0
+Amazon Promotion Page Monitor v2.1
 
 Surveille https://www.amazon.fr/promotion/psp/A26013IELTKPDW toutes les
 INTERVAL_SECONDS secondes et notifie via webhook Discord lorsqu'un nouveau
@@ -47,7 +47,6 @@ STATE_FILE = SCRIPT_DIR / "state.json"
 AMAZON_BASE = "https://www.amazon.fr"
 EMBED_COLOR = 0xFF9900
 
-# Selecteurs — bases sur la structure HTML reelle de la page promo Amazon
 PRODUCT_SELECTOR = "li.productGrid[data-asin]"
 DELIVERY_SELECTOR = ".udm-primary-delivery-message"
 SEE_MORE_SELECTOR = "a[href*='ref=_see_more']"
@@ -105,7 +104,6 @@ def save_state(state: Dict[str, Dict[str, Any]]) -> None:
 
 
 async def _expand_all(page: Page) -> None:
-    """Clique sur tous les boutons 'Afficher plus' jusqu'a epuisement."""
     clicks = 0
     while True:
         try:
@@ -122,11 +120,8 @@ async def _expand_all(page: Page) -> None:
 
 async def _wait_for_delivery_blocks(page: Page) -> None:
     """
-    Poll le nombre de blocs livraison jusqu'a stabilisation.
-
-    Amazon injecte .udm-primary-delivery-message en asynchrone apres le
-    rendu initial. On attend que le count ne bouge plus pendant 2 secondes
-    consecutives avant de lancer l'extraction.
+    Poll le count de blocs livraison jusqu'a stabilisation (2 s sans variation).
+    Amazon les injecte en asynchrone apres le rendu initial.
     """
     prev_count = -1
     stable_ticks = 0
@@ -134,7 +129,7 @@ async def _wait_for_delivery_blocks(page: Page) -> None:
         count = await page.locator(DELIVERY_SELECTOR).count()
         if count == prev_count:
             stable_ticks += 1
-            if stable_ticks >= 4:  # stable depuis 2 s
+            if stable_ticks >= 4:
                 log(f"  → {count} bloc(s) livraison stables")
                 return
         else:
@@ -168,10 +163,16 @@ _EXTRACT_JS = """
             el.querySelector("[data-name='availabilityMessage']")
               ?.textContent?.trim() || null;
 
-        const deliveryBold = el.querySelector(
-            ".udm-primary-delivery-message .a-text-bold"
-        );
+        // Prix via aria-label (ex: "12,21 €")
+        const priceEl = el.querySelector("[name='productPriceToPay']");
+        const prix = priceEl?.getAttribute("aria-label")?.trim() || null;
+
+        // Message de livraison complet + date seule
+        const deliveryBlock = el.querySelector(".udm-primary-delivery-message");
+        const deliveryBold = deliveryBlock?.querySelector(".a-text-bold");
         const deliveryDate = deliveryBold?.textContent?.trim() || null;
+        const messageLivraison = deliveryBlock?.textContent
+            ?.replace(/\\s+/g, " ").trim() || null;
 
         products[asin] = {
             titre: title,
@@ -179,8 +180,10 @@ _EXTRACT_JS = """
             image,
             position: i,
             disponibilite: availability,
+            prix,
             commandable: !!deliveryDate,
             dateLivraison: deliveryDate,
+            messageLivraison,
         };
     });
 
@@ -190,10 +193,8 @@ _EXTRACT_JS = """
 
 
 async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
-    """Charge la page, attend le DOM complet et extrait tous les produits."""
     await page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
 
-    # Attente du grid produit
     try:
         await page.wait_for_selector(PRODUCT_SELECTOR, timeout=30000)
     except Exception:
@@ -204,8 +205,6 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
     log(f"  → {nb} produit(s) charge(s)")
 
     await _expand_all(page)
-
-    nb = await page.locator(PRODUCT_SELECTOR).count()
     await _wait_for_delivery_blocks(page)
 
     result = await page.evaluate(_EXTRACT_JS)
@@ -233,47 +232,76 @@ def notify_discord(
     asin: str,
     product: Dict[str, Any],
     reason: str = "nouveau",
+    prev: Optional[Dict[str, Any]] = None,
 ) -> None:
     title = (product.get("titre") or f"Produit {asin}")[:256]
     url = product.get("lien") or f"{AMAZON_BASE}/dp/{asin}"
     image = product.get("image")
-    availability = product.get("disponibilite") or "Non renseignee"
+    prix = product.get("prix")
     commandable = product.get("commandable", False)
     delivery_date = product.get("dateLivraison")
+    msg_livraison = product.get("messageLivraison")
+    availability = product.get("disponibilite") or "Non renseignee"
 
-    orderable_line = (
-        f"\n🟢 Commandable — livraison : **{delivery_date}**"
-        if commandable and delivery_date
-        else "\n🟢 Commandable"
-        if commandable
-        else "\n🔴 Non commandable"
-    )
+    cart_link = f"[🛒 Ajouter 2 ex. au panier (ATC)]({_cart_url(asin)})"
 
-    if reason == "tete_de_liste":
-        description = f"⬆️ Passe en tete de liste !{orderable_line}\nDisponibilite : {availability}"
-    elif reason == "disponibilite":
-        description = f"📦 Disponibilite mise a jour : **{availability}**{orderable_line}"
-    elif reason == "commandable":
-        description = "🛒 Produit maintenant commandable !"
-        if delivery_date:
-            description += f"\n📅 Livraison : **{delivery_date}**"
-    else:
-        description = f"Nouveau produit detecte sur la page promotionnelle Amazon !{orderable_line}"
+    # Titre de la notification selon l'evenement
+    event_titles = {
+        "nouveau":       "🆕 Nouveau produit détecté !",
+        "commandable":   "🟢 Produit de retour en stock !",
+        "tete_de_liste": "⬆️ Passé en tête de liste !",
+        "disponibilite": "📦 Changement de disponibilité",
+    }
+    event_title = event_titles.get(reason, "ℹ️ Mise à jour produit")
+
+    lines = [f"**{event_title}**", "", cart_link, ""]
+
+    # Avant / Maintenant pour disponibilite
+    if reason == "disponibilite" and prev:
+        prev_avail = prev.get("disponibilite") or "—"
+        lines += [
+            "**🔄 Changement de Statut**",
+            f"🔴 Avant : *{prev_avail}*",
+            f"🟢 Maintenant : **{availability}**",
+            "",
+        ]
+    elif reason not in ("commandable", "nouveau", "tete_de_liste"):
+        lines += [f"Disponibilite : {availability}", ""]
+
+    # Avant / Maintenant pour livraison
+    if reason == "commandable" and prev:
+        prev_msg = prev.get("messageLivraison") or "Livraison non disponible"
+        curr_msg = msg_livraison or (
+            f"Livraison GRATUITE {delivery_date} pour les membres Prime"
+            if delivery_date else "—"
+        )
+        lines += [
+            "**🚚 Infos de Livraison**",
+            f"🔴 Avant : *{prev_msg}*",
+            f"🟢 Maintenant : **{curr_msg}**",
+            "",
+        ]
+    elif commandable and msg_livraison:
+        lines += [f"🟢 {msg_livraison}", ""]
+    elif not commandable:
+        lines += ["🔴 Non commandable", ""]
+
+    description = "\n".join(lines).strip()
+
+    # Champs inline : Prix + ASIN
+    fields = []
+    if prix:
+        fields.append({"name": "💰 Prix", "value": prix, "inline": True})
+    fields.append({"name": "🆔 ASIN", "value": asin, "inline": True})
 
     embed: Dict[str, Any] = {
         "title": title,
         "url": url,
         "color": EMBED_COLOR,
         "description": description,
-        "fields": [
-            {
-                "name": "Panier",
-                "value": f"[🛒 Ajouter au panier (x2)]({_cart_url(asin)})",
-                "inline": True,
-            }
-        ],
+        "fields": fields,
         "footer": {
-            "text": "Amazon Monitor • amazon.fr/promotion/psp/A26013IELTKPDW"
+            "text": "Bot Amazon Promotion Bluray • amazon.fr/promotion/psp/A26013IELTKPDW"
         },
     }
     if image:
@@ -316,7 +344,6 @@ async def run_cycle(
         log("⚠️ Aucun produit (probable anti-bot) — etat conserve")
         return state
 
-    # Nouveaux produits
     for asin in [a for a in products if a not in state]:
         title = products[asin].get("titre") or asin
         log(f"🆕 Nouveau : {title} ({asin})")
@@ -325,20 +352,17 @@ async def run_cycle(
         except Exception as exc:
             log(f"⚠️ Erreur notification : {exc}")
 
-    # Produits deja connus
     for asin, product in products.items():
         if asin not in state:
             continue
         prev = state[asin]
 
-        # Passage en tete de liste
-        prev_pos = prev.get("position")
-        curr_pos = product.get("position")
-        if curr_pos == 0 and prev_pos not in (None, 0):
+        # Tete de liste
+        if product.get("position") == 0 and prev.get("position") not in (None, 0):
             title = product.get("titre") or asin
             log(f"⬆️ Tete de liste : {title} ({asin})")
             try:
-                notify_discord(asin, product, reason="tete_de_liste")
+                notify_discord(asin, product, reason="tete_de_liste", prev=prev)
             except Exception as exc:
                 log(f"⚠️ Erreur notification : {exc}")
 
@@ -353,17 +377,16 @@ async def run_cycle(
             title = product.get("titre") or asin
             log(f"📦 Disponibilite : {curr_avail} — {title} ({asin})")
             try:
-                notify_discord(asin, product, reason="disponibilite")
+                notify_discord(asin, product, reason="disponibilite", prev=prev)
             except Exception as exc:
                 log(f"⚠️ Erreur notification : {exc}")
 
-        # Produit devient commandable
+        # Devient commandable
         if product.get("commandable") and not prev.get("commandable"):
             title = product.get("titre") or asin
-            date_info = product.get("dateLivraison") or ""
-            log(f"🛒 Commandable : {title} ({asin}) — {date_info}")
+            log(f"🛒 Commandable : {title} ({asin}) — {product.get('dateLivraison', '')}")
             try:
-                notify_discord(asin, product, reason="commandable")
+                notify_discord(asin, product, reason="commandable", prev=prev)
             except Exception as exc:
                 log(f"⚠️ Erreur notification : {exc}")
 
