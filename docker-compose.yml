@@ -1,0 +1,14 @@
+services:
+  monitor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./state.json:/app/state.json
+      - ./amazon_session.json:/app/amazon_session.json:ro
+    shm_size: 256mb
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
