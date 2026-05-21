@@ -188,7 +188,7 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
     sep = "&" if "?" in config.TARGET_URL else "?"
     url = f"{config.TARGET_URL}{sep}cb={cb}"
 
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    await page.goto(url, wait_until="networkidle", timeout=60000)
 
     try:
         await page.wait_for_function(
