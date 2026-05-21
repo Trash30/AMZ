@@ -62,8 +62,6 @@ async def run_cycle(
             continue
         prev = state[asin]
 
-        # PAS de check position / tete de liste (supprime)
-
         # Changement de disponibilite (hors disponibilites normales)
         prev_avail = prev.get("disponibilite")
         curr_avail = product.get("disponibilite")
@@ -84,8 +82,8 @@ async def run_cycle(
         # Produit devenu commandable (False -> True)
         if product.get("commandable") and not prev.get("commandable"):
             title = product.get("titre") or asin
-            date_info = product.get("dateLivraison") or ""
-            log(f"🛒 Commandable : {title} ({asin}) — {date_info}")
+            delivery_info = product.get("deliveryText") or ""
+            log(f"🛒 Commandable : {title} ({asin}) — {delivery_info}")
             try:
                 await notify_discord(
                     asin, product, reason="commandable", prev=prev
@@ -93,8 +91,27 @@ async def run_cycle(
             except Exception as exc:
                 log(f"⚠️ Erreur notification : {exc}")
 
-    save_state(products)
-    return products
+    # Grace period : ne supprimer les ASINs absents qu'apres N scans consecutifs
+    new_state = dict(products)
+    for asin in list(state.keys()):
+        if asin in products:
+            # present : reset missing_count
+            new_state[asin]["missing_count"] = 0
+        else:
+            prev = state[asin]
+            missing = prev.get("missing_count", 0) + 1
+            if missing >= config.GRACE_PERIOD_SCANS:
+                title = prev.get("titre") or asin
+                log(f"🗑️ Supprime {asin} ({title}) — absent {config.GRACE_PERIOD_SCANS} scans")
+            else:
+                title = prev.get("titre") or asin
+                log(f"⚠️ Absent ASIN {asin} ({title}) — essai {missing}/{config.GRACE_PERIOD_SCANS}")
+                entry = dict(prev)
+                entry["missing_count"] = missing
+                new_state[asin] = entry
+
+    save_state(new_state)
+    return new_state
 
 
 async def main() -> None:
@@ -106,6 +123,8 @@ async def main() -> None:
         browser, context = await create_browser_context(playwright)
         page: Page = await context.new_page()
 
+        scan_count = 0
+        startup_notified = False
         cycle_index = 0
         try:
             if initial_run:
@@ -123,7 +142,33 @@ async def main() -> None:
             while True:
                 await asyncio.sleep(config.INTERVAL_SECONDS)
                 cycle_index += 1
+                scan_count += 1
+
+                # Recyclage navigateur periodique
+                if scan_count > 1 and scan_count % config.BROWSER_RECYCLE_INTERVAL == 0:
+                    log(f"[System] Recyclage navigateur (scan #{scan_count})...")
+                    try:
+                        await context.close()
+                        await browser.close()
+                        browser, context = await create_browser_context(playwright)
+                        page = await context.new_page()
+                    except Exception as exc:
+                        log(f"⚠️ Erreur recyclage navigateur : {exc}")
+
                 state = await run_cycle(page, state, cycle_index)
+
+                # Notification demarrage apres le premier scrape reussi
+                if not startup_notified and state:
+                    startup_notified = True
+                    try:
+                        await notify_discord(
+                            "",
+                            {},
+                            reason="demarrage",
+                            all_products=list(state.values()),
+                        )
+                    except Exception as exc:
+                        log(f"⚠️ Erreur notification demarrage : {exc}")
         finally:
             await context.close()
             await browser.close()

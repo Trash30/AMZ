@@ -83,3 +83,6 @@ NORMAL_AVAILABILITY = {
     "Habituellement expédié sous 6 à 7 mois",
     "Habituellement expédié sous 1 à 3 mois",
 }
+
+BROWSER_RECYCLE_INTERVAL: int = _get_int("BROWSER_RECYCLE_INTERVAL", 150)
+GRACE_PERIOD_SCANS: int = _get_int("GRACE_PERIOD_SCANS", 5)
