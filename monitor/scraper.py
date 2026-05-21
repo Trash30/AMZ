@@ -61,17 +61,6 @@ async def create_browser_context(
         except (json.JSONDecodeError, OSError, KeyError) as exc:
             log(f"⚠️ Erreur lecture amazon_session.json : {exc}")
 
-    async def _block_resources(route: Any) -> None:
-        req = route.request
-        if req.resource_type in ("font", "media") or any(
-            kw in req.url
-            for kw in ("google-analytics", "analytics", "amazon-adsystem", "doubleclick", "device-metrics")
-        ):
-            await route.abort()
-        else:
-            await route.continue_()
-
-    await context.route("**/*", _block_resources)
 
     return browser, context
 
