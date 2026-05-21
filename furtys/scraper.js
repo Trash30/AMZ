@@ -66,14 +66,18 @@ async function getPersistentContext(headless = true) {
     }
 
     console.log("[Scraper] Launching persistent Chromium instance...");
-    persistentBrowser = await chromium.launch({
+    const launchOptions = {
         headless: headless,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-blink-features=AutomationControlled'
         ]
-    });
+    };
+    if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
+        launchOptions.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+    }
+    persistentBrowser = await chromium.launch(launchOptions);
 
     persistentContext = await persistentBrowser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
