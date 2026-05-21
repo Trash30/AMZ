@@ -61,6 +61,18 @@ async def create_browser_context(
         except (json.JSONDecodeError, OSError, KeyError) as exc:
             log(f"⚠️ Erreur lecture amazon_session.json : {exc}")
 
+    async def _block_resources(route: Any) -> None:
+        req = route.request
+        if req.resource_type in ("font", "media") or any(
+            kw in req.url
+            for kw in ("google-analytics", "analytics", "amazon-adsystem", "doubleclick", "device-metrics")
+        ):
+            await route.abort()
+        else:
+            await route.continue_()
+
+    await context.route("**/*", _block_resources)
+
     return browser, context
 
 
@@ -175,27 +187,6 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
     cb = int(time.time() * 1000)
     sep = "&" if "?" in config.TARGET_URL else "?"
     url = f"{config.TARGET_URL}{sep}cb={cb}"
-
-    await page.route(
-        "**/*",
-        lambda route: (
-            route.abort()
-            if (
-                route.request.resource_type in ("font", "media")
-                or any(
-                    kw in route.request.url
-                    for kw in (
-                        "google-analytics",
-                        "analytics",
-                        "amazon-adsystem",
-                        "doubleclick",
-                        "device-metrics",
-                    )
-                )
-            )
-            else route.continue_()
-        ),
-    )
 
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
