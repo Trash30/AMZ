@@ -3,3 +3,6 @@ state.json
 __pycache__/
 *.pyc
 .env
+furtys/node_modules
+furtys/.env
+furtys/database.json

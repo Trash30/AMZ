@@ -1,0 +1,24 @@
+{
+  "name": "bot-amazon-bluray",
+  "version": "1.0.0",
+  "description": "Discord bot that monitors Amazon promotion pages for restocks and new products",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "amazon",
+    "scraper",
+    "discord",
+    "webhook",
+    "monitor",
+    "restock"
+  ],
+  "author": "Antigravity",
+  "license": "ISC",
+  "dependencies": {
+    "@pm2/io": "^6.1.0",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.49.0"
+  }
+}
