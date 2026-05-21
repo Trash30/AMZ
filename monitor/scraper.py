@@ -34,14 +34,17 @@ PRODUCT_SELECTOR = "[data-asin]"
 async def create_browser_context(
     playwright: Playwright,
 ) -> Tuple[Browser, BrowserContext]:
-    browser: Browser = await playwright.chromium.launch(
-        headless=True,
-        args=[
+    launch_kwargs: dict = {
+        "headless": True,
+        "args": [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-blink-features=AutomationControlled",
         ],
-    )
+    }
+    if config.CHROMIUM_EXECUTABLE:
+        launch_kwargs["executable_path"] = config.CHROMIUM_EXECUTABLE
+    browser: Browser = await playwright.chromium.launch(**launch_kwargs)
     context: BrowserContext = await browser.new_context(
         user_agent=config.USER_AGENT,
         viewport=config.VIEWPORT,

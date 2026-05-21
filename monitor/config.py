@@ -51,6 +51,8 @@ INTERVAL_SECONDS: int = _get_int("INTERVAL_SECONDS", 5)
 
 STATE_FILE: Path = Path(_get_str("STATE_FILE", str(PROJECT_ROOT / "state.json")))
 
+CHROMIUM_EXECUTABLE: str = _get_str("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "")
+
 
 # ---------------------------------------------------------------------------
 # Constantes navigateur / page
