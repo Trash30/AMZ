@@ -3,3 +3,6 @@ state.json
 __pycache__/
 *.pyc
 .env
+.venv/
+amazon_session.json
+chrome_profile/
