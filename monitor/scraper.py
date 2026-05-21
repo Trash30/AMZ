@@ -181,6 +181,7 @@ async def scrape_products(page: Page) -> Dict[str, Dict[str, Any]]:
     url = f"{config.TARGET_URL}{sep}cb={cb}"
 
     await page.goto(url, wait_until="networkidle", timeout=60000)
+    log(f"  → Page chargée : {await page.title()}")
 
     try:
         await page.wait_for_function(
